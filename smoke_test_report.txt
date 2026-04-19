@@ -1,0 +1,32 @@
+Binance Futures Scanner Rules Update - Smoke Test Report
+Date: 2026-04-19
+
+Checks performed:
+1. Syntax validation passed for:
+   - index.js
+   - signals.js
+   - dryrun.js
+   - telegram.js
+   - telegramMessageBuilder.js
+   - state.js
+   - config.js
+
+2. Logic smoke tests passed for:
+   - strict base timeframe filter (only 1m, 5m)
+   - minimum 3 support timeframes including self
+   - score > 80 filter for signal generation
+   - adjusted target / stop generation from system TP1 and SL
+   - one blocking signal at a time
+   - gate release only after the active trade closes
+   - single-model trade stats updates
+   - full trade closure after target or stop is hit
+   - strategy retention cleanup and manual clear commands
+
+3. Smoke test outcome snapshot:
+   - adjusted target hit was detected correctly
+   - adjusted stop hit was detected correctly
+   - new signal opened only after the previous trade closed
+   - stats updated correctly for the single active trade model
+
+Note:
+- Runtime smoke test uses isolated temporary storage so live bot data is not modified.

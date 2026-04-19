@@ -1,0 +1,19 @@
+{
+  "generatedAt": "2026-04-19T15:59:17.367Z",
+  "watchedPairs": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT"
+  ],
+  "watchedValid": [
+    "BTCUSDT",
+    "ETHUSDT",
+    "SOLUSDT",
+    "BNBUSDT",
+    "XRPUSDT"
+  ],
+  "scannedUniverse": 5,
+  "candidates": []
+}
