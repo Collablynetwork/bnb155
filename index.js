@@ -409,7 +409,8 @@ async function runScan(options = {}) {
       }
     }
 
-    const allCandidates = dedupeCandidates(candidates);
+    const preparedSignals = signalEngine.prepareSignalCandidates(candidates);
+    const allCandidates = dedupeCandidates(preparedSignals.validCandidates);
     const topCandidates = allCandidates.slice(0, 25);
 
     state.writeJson(config.scoreStatePath, {
@@ -418,6 +419,7 @@ async function runScan(options = {}) {
       watchedValid,
       scannedUniverse: scanPairs.length,
       candidates: topCandidates,
+      blockedSignals: preparedSignals.blockedCandidates.slice(0, 25),
     });
 
     const prices = {};

@@ -78,6 +78,7 @@ module.exports = {
 
   pairsPath: path.join(storageDir, "pairs.json"),
   scoreStatePath: path.join(storageDir, "score-state.json"),
+  scoreMomentumStatePath: path.join(storageDir, "score-momentum-state.json"),
   activeSignalsPath: path.join(storageDir, "active-signals.json"),
   dryRunPositionsPath: path.join(storageDir, "dryrun-positions.json"),
   closedTradesPath: path.join(storageDir, "closed-trades.json"),

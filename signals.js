@@ -15,18 +15,40 @@ const INTERNAL_SIGNAL_HISTORY_DEFAULT = { events: [], lastByPair: {} };
 const INTERNAL_SIGNAL_EVENT_LIMIT = 100;
 const REVERSE_MAJORITY_WINDOW = 3;
 const REVERSE_MAJORITY_MIN = 2;
-const BREADTH_REVERSAL_WINDOW = 5;
 
-function getBand(score) {
-  const value = Number(score || 0);
-  if (value >= config.alertThreshold) return "alert";
-  if (value > config.notifyMinScore) return "strong";
-  if (value >= config.watchThreshold) return "watch";
-  return "low";
+const SCORE_RANGE_LABELS = {
+  [-1]: "Below 70",
+  0: "T0",
+  1: "T1",
+  2: "T2",
+  3: "T3",
+  4: "T4",
+  5: "T5",
+};
+
+function getScoreRangeIndex(score) {
+  const value = Number(score);
+  if (!Number.isFinite(value)) return null;
+  if (value < 70) return -1;
+  if (value < 75) return 0;
+  if (value < 80) return 1;
+  if (value < 85) return 2;
+  if (value < 90) return 3;
+  if (value < 95) return 4;
+  return 5;
 }
 
-function bandRank(band) {
-  return { low: 0, watch: 1, strong: 2, alert: 3 }[band] ?? 0;
+function getScoreRangeLabel(index) {
+  if (index === null || index === undefined) return "Start";
+  return SCORE_RANGE_LABELS[index] || `T${index}`;
+}
+
+function buildScoreMove(previousIndex, currentIndex) {
+  return `${getScoreRangeLabel(previousIndex)} → ${getScoreRangeLabel(currentIndex)}`;
+}
+
+function uniqueStrings(values) {
+  return [...new Set((values || []).map((v) => String(v).trim()).filter(Boolean))];
 }
 
 function normalizeCandidate(candidate) {
@@ -57,10 +79,6 @@ function buildSignalKey(candidate) {
   ].join("|");
 }
 
-function uniqueStrings(values) {
-  return [...new Set((values || []).map((v) => String(v).trim()).filter(Boolean))];
-}
-
 function oppositeSide(side) {
   return String(side || "").toUpperCase() === "SHORT" ? "LONG" : "SHORT";
 }
@@ -72,9 +90,7 @@ function adjustSystemValue(value, side, direction) {
   const isShort = String(side).toUpperCase() === "SHORT";
 
   if (!Number.isFinite(base) || base <= 0) return 0;
-  if (isShort) {
-    return base * (1 + factor);
-  }
+  if (isShort) return base * (1 + factor);
   return base * (1 - factor);
 }
 
@@ -115,7 +131,9 @@ function buildSignalCandidate(matchResult) {
   if (!matchResult) return null;
   const score = Number(matchResult.score);
   if (!Number.isFinite(score)) return null;
-  if (score <= Number(config.notifyMinScore || 80)) return null;
+
+  const pair = String(matchResult.pair || "").toUpperCase();
+  if (!pair) return null;
 
   const side =
     String(matchResult.side || matchResult.direction || "LONG").toUpperCase() === "SHORT"
@@ -154,7 +172,7 @@ function buildSignalCandidate(matchResult) {
   const strategyUsed = `${strategySourcePair} ${strategySourceTimeframe}`.trim();
 
   return {
-    pair: String(matchResult.pair || "").toUpperCase(),
+    pair,
     side,
     direction: side,
     score,
@@ -185,35 +203,195 @@ function buildSignalCandidate(matchResult) {
   };
 }
 
-async function sendNewSignal(bot, chatId, candidate) {
-  if (!bot || !chatId) return null;
+function normalizeMomentumSnapshot(snapshot) {
+  const lastObservedRangeIndex = Number(snapshot?.lastObservedRangeIndex);
+  const lastValidRangeIndex = Number(snapshot?.lastValidRangeIndex);
 
-  const text = buildSignalMessage(candidate);
-  const replyMarkup = buildSignalReplyMarkup(candidate);
-
-  return bot.sendMessage(chatId, text, {
-    reply_markup: replyMarkup,
-    disable_web_page_preview: true,
-  });
+  return {
+    lastObservedRangeIndex: Number.isFinite(lastObservedRangeIndex) ? lastObservedRangeIndex : null,
+    lastObservedScore: Number.isFinite(Number(snapshot?.lastObservedScore))
+      ? Number(snapshot.lastObservedScore)
+      : null,
+    lastValidRangeIndex: Number.isFinite(lastValidRangeIndex) ? lastValidRangeIndex : null,
+    sequenceLocked: snapshot?.sequenceLocked === true,
+    updatedAt: snapshot?.updatedAt || null,
+  };
 }
 
-async function sendScoreRise(bot, chatId, previous, current) {
-  if (!bot || !chatId || !previous?.messageId) return null;
+function defaultMomentumSnapshot() {
+  return normalizeMomentumSnapshot({});
+}
 
-  const text = buildScoreRisingMessage({
-    pair: current.pair,
-    baseTf: current.baseTimeframe,
-    oldScore: previous.score,
-    newScore: current.score,
-    updates: current.reasons?.slice(0, 4) || [],
-  });
+function loadScoreMomentumState() {
+  const raw = state.readJson(config.scoreMomentumStatePath, {}) || {};
+  const normalized = {};
 
-  const message = await bot.sendMessage(chatId, text, {
-    reply_to_message_id: previous.messageId,
-  });
+  for (const [key, value] of Object.entries(raw)) {
+    normalized[key] = normalizeMomentumSnapshot(value);
+  }
 
-  deleteTelegramMessageLater(bot, chatId, message?.message_id);
-  return message;
+  return normalized;
+}
+
+function saveScoreMomentumState(snapshot) {
+  state.writeJson(config.scoreMomentumStatePath, snapshot || {});
+  return snapshot;
+}
+
+function shouldLogBlockedMove(previousIndex, currentIndex) {
+  return (previousIndex ?? -1) >= 2 || currentIndex >= 2;
+}
+
+function evaluateCandidateMomentum(candidate, previousSnapshot, evaluatedAt = new Date().toISOString()) {
+  const currentRangeIndex = getScoreRangeIndex(candidate.score);
+  const currentRangeLabel = getScoreRangeLabel(currentRangeIndex);
+  const previous = normalizeMomentumSnapshot(previousSnapshot);
+  const previousRangeIndex = previous.lastObservedRangeIndex;
+  const previousRangeLabel = getScoreRangeLabel(previousRangeIndex);
+  const previousValidRangeIndex = previous.lastValidRangeIndex;
+  const scoreMove = buildScoreMove(previousRangeIndex, currentRangeIndex);
+
+  let lastObservedRangeIndex = currentRangeIndex;
+  let lastValidRangeIndex = previousValidRangeIndex;
+  let sequenceLocked = previous.sequenceLocked === true;
+  let transitionType = "tracking";
+  let momentumLabel = "Tracking Only";
+  let validSignalEvent = false;
+  let entryEligible = false;
+  let blockedReason = null;
+
+  if (currentRangeIndex === null) {
+    blockedReason = "score range could not be determined";
+    transitionType = "blocked";
+    momentumLabel = "Invalid Score";
+  } else if (currentRangeIndex < 0) {
+    lastValidRangeIndex = null;
+    sequenceLocked = false;
+    transitionType = "reset";
+    momentumLabel = "Reset Below 70";
+  } else if (currentRangeIndex === 0) {
+    lastValidRangeIndex = 0;
+    sequenceLocked = false;
+    transitionType = "tracking";
+    momentumLabel = "Tracking Reset";
+  } else if (currentRangeIndex === 1) {
+    if (
+      previousRangeIndex !== null &&
+      previousRangeIndex >= 2 &&
+      currentRangeIndex < previousRangeIndex
+    ) {
+      sequenceLocked = true;
+      blockedReason = `fallback move ${scoreMove}; T0 reset required before T2 again`;
+      momentumLabel = "Fallback Locked";
+      transitionType = "blocked";
+    } else if (previousRangeIndex === 0 && previousValidRangeIndex === 0 && !sequenceLocked) {
+      lastValidRangeIndex = 1;
+      transitionType = "tracking";
+      momentumLabel = "Tracking Rising";
+    } else {
+      transitionType = "tracking";
+      momentumLabel = sequenceLocked ? "Tracking Locked" : "Tracking Only";
+    }
+  } else if (previousRangeIndex !== null && currentRangeIndex === previousRangeIndex) {
+    blockedReason = `same-range score move ${scoreMove}`;
+    transitionType = "blocked";
+    momentumLabel = "Same Range";
+  } else if (previousRangeIndex !== null && currentRangeIndex < previousRangeIndex) {
+    if (currentRangeIndex === 0) {
+      lastValidRangeIndex = 0;
+      sequenceLocked = false;
+      transitionType = "reset";
+      momentumLabel = "Tracking Reset";
+    } else {
+      sequenceLocked = true;
+      blockedReason = `fallback move ${scoreMove}; T0 reset required before T2 again`;
+      transitionType = "blocked";
+      momentumLabel = "Fallback Locked";
+    }
+  } else if (previousRangeIndex !== null && currentRangeIndex > previousRangeIndex + 1) {
+    blockedReason = `invalid score jump ${scoreMove}`;
+    transitionType = "blocked";
+    momentumLabel = "Jump Blocked";
+  } else if (sequenceLocked) {
+    blockedReason = `fallback lock active; T0 reset required before ${currentRangeLabel}`;
+    transitionType = "blocked";
+    momentumLabel = "Fallback Locked";
+  } else if (currentRangeIndex === 2) {
+    if (previousRangeIndex === 1 && previousValidRangeIndex === 1) {
+      lastValidRangeIndex = 2;
+      transitionType = "first_signal";
+      momentumLabel = "Fresh Rising";
+      validSignalEvent = true;
+      entryEligible = true;
+    } else if (previousRangeIndex === 1) {
+      blockedReason = `blocked re-entry ${scoreMove}; fresh T0 → T1 → T2 sequence required`;
+      transitionType = "blocked";
+      momentumLabel = "Freshness Blocked";
+    } else {
+      blockedReason = `invalid score jump ${scoreMove}`;
+      transitionType = "blocked";
+      momentumLabel = "Jump Blocked";
+    }
+  } else if (
+    previousRangeIndex === currentRangeIndex - 1 &&
+    previousValidRangeIndex === currentRangeIndex - 1 &&
+    previousValidRangeIndex >= 2
+  ) {
+    lastValidRangeIndex = currentRangeIndex;
+    transitionType = "continuation";
+    momentumLabel = "Step Rising";
+    validSignalEvent = true;
+  } else {
+    blockedReason = `blocked continuation ${scoreMove}; prior fresh buildup was not valid`;
+    transitionType = "blocked";
+    momentumLabel = "Sequence Blocked";
+  }
+
+  const nextSnapshot = {
+    lastObservedRangeIndex,
+    lastObservedScore: Number(candidate.score),
+    lastValidRangeIndex,
+    sequenceLocked,
+    updatedAt: evaluatedAt,
+  };
+
+  return {
+    currentRangeIndex,
+    currentRangeLabel,
+    previousRangeIndex,
+    previousRangeLabel,
+    scoreMove,
+    transitionType,
+    momentumLabel,
+    validSignalEvent,
+    entryEligible,
+    blockedReason,
+    shouldLogBlocked: Boolean(blockedReason && shouldLogBlockedMove(previousRangeIndex, currentRangeIndex)),
+    nextSnapshot,
+  };
+}
+
+function logBlockedCandidate(candidate, evaluation) {
+  if (!evaluation?.shouldLogBlocked) return;
+  console.log(
+    `Blocked ${candidate.pair} ${candidate.side} ${candidate.baseTimeframe}: ${evaluation.blockedReason}.`
+  );
+}
+
+function enrichCandidateWithMomentum(candidate, evaluation) {
+  return {
+    ...candidate,
+    scoreRange: evaluation.currentRangeLabel,
+    scoreRangeIndex: evaluation.currentRangeIndex,
+    previousScoreRange: evaluation.previousRangeLabel,
+    previousScoreRangeIndex: evaluation.previousRangeIndex,
+    scoreMove: evaluation.scoreMove,
+    momentum: evaluation.momentumLabel,
+    momentumStatus: evaluation.transitionType,
+    validSignalEvent: evaluation.validSignalEvent,
+    entryEligible: evaluation.entryEligible,
+    blockedReason: evaluation.blockedReason,
+  };
 }
 
 function dedupeCandidates(candidates) {
@@ -257,6 +435,83 @@ function strongestCandidatePerPair(candidates) {
   return [...byPair.values()];
 }
 
+function prepareSignalCandidates(candidates, options = {}) {
+  const evaluatedAt = options.evaluatedAt || new Date().toISOString();
+  const momentumState = loadScoreMomentumState();
+  const deduped = dedupeCandidates(candidates);
+  const validCandidates = [];
+  const blockedCandidates = [];
+  const evaluatedCandidates = [];
+
+  for (const candidate of deduped) {
+    const signalKey = buildSignalKey(candidate);
+    const evaluation = evaluateCandidateMomentum(candidate, momentumState[signalKey], evaluatedAt);
+    const enriched = enrichCandidateWithMomentum(
+      {
+        ...candidate,
+        signalKey,
+      },
+      evaluation
+    );
+
+    momentumState[signalKey] = evaluation.nextSnapshot;
+    evaluatedCandidates.push(enriched);
+
+    if (evaluation.validSignalEvent) {
+      validCandidates.push(enriched);
+      continue;
+    }
+
+    if (evaluation.blockedReason) {
+      blockedCandidates.push(enriched);
+      logBlockedCandidate(enriched, evaluation);
+    }
+  }
+
+  saveScoreMomentumState(momentumState);
+
+  return {
+    evaluatedCandidates,
+    validCandidates,
+    blockedCandidates,
+    entryCandidates: validCandidates.filter((candidate) => candidate.entryEligible),
+  };
+}
+
+async function sendNewSignal(bot, chatId, candidate) {
+  if (!bot || !chatId) return null;
+
+  const text = buildSignalMessage(candidate);
+  const replyMarkup = buildSignalReplyMarkup(candidate);
+
+  return bot.sendMessage(chatId, text, {
+    reply_markup: replyMarkup,
+    disable_web_page_preview: true,
+  });
+}
+
+async function sendScoreRise(bot, chatId, previous, current) {
+  if (!bot || !chatId || !previous?.messageId) return null;
+
+  const text = buildScoreRisingMessage({
+    pair: current.pair,
+    baseTf: current.baseTimeframe,
+    oldScore: previous.score,
+    newScore: current.score,
+    scoreRange: current.scoreRange,
+    scoreMove: current.scoreMove,
+    momentum: current.momentum,
+    updates: current.reasons?.slice(0, 4) || [],
+  });
+
+  const message = await bot.sendMessage(chatId, text, {
+    reply_to_message_id: previous.messageId,
+  });
+
+  deleteTelegramMessageLater(bot, chatId, message?.message_id);
+  return message;
+}
+
 function loadInternalSignalHistory() {
   const raw = state.readJson(config.internalSignalHistoryPath, INTERNAL_SIGNAL_HISTORY_DEFAULT) || {};
   return {
@@ -273,29 +528,28 @@ function saveInternalSignalHistory(snapshot) {
 function recordInternalSignalEvents(candidates, recordedAt = new Date().toISOString()) {
   const history = loadInternalSignalHistory();
   const strongest = strongestCandidatePerPair(candidates)
+    .filter((candidate) => candidate.validSignalEvent)
     .sort((a, b) => Number(a.score || 0) - Number(b.score || 0));
 
   for (const candidate of strongest) {
     const pair = String(candidate.pair || "").toUpperCase();
     const side = String(candidate.side || "").toUpperCase();
-    const previous = history.lastByPair[pair];
-
-    history.lastByPair[pair] = {
-      side,
-      score: Number(candidate.score || 0),
-      recordedAt,
-      baseTimeframe: candidate.baseTimeframe || null,
-    };
-
-    if (previous?.side === side) continue;
-
-    history.events.push({
+    const event = {
       pair,
       side,
       score: Number(candidate.score || 0),
+      scoreRange: candidate.scoreRange || null,
+      scoreMove: candidate.scoreMove || null,
+      momentum: candidate.momentum || null,
+      transitionType: candidate.momentumStatus || null,
+      entryEligible: candidate.entryEligible === true,
       baseTimeframe: candidate.baseTimeframe || null,
+      signalKey: candidate.signalKey || buildSignalKey(candidate),
       recordedAt,
-    });
+    };
+
+    history.lastByPair[pair] = event;
+    history.events.push(event);
   }
 
   history.events = history.events.slice(-INTERNAL_SIGNAL_EVENT_LIMIT);
@@ -308,12 +562,18 @@ function recentOtherSignalEvents(events, pair, limit) {
     .slice(-limit);
 }
 
-function buildForcedCloseReasonForCondition1(position, reverseSide, reverseVotes, windowEvents) {
-  return `Market is getting reversed. Same-pair ${reverseSide} signal appeared and ${reverseVotes} of the last ${windowEvents.length} internal signals from other pairs also flipped ${reverseSide}.`;
-}
-
-function buildForcedCloseReasonForCondition2(position, reverseSide) {
-  return `Closed because the last ${BREADTH_REVERSAL_WINDOW} internal signals from other pairs were ${reverseSide}, showing broad market reversal pressure.`;
+function buildForcedCloseDetails(position, reverseCandidate, reverseVotes) {
+  return {
+    reasonCode: "MARKET_REVERSED",
+    reasonText:
+      "Same-pair reverse signal plus market-wide reverse confirmation.",
+    forceDirection: reverseCandidate.side,
+    reverseSignalSide: reverseCandidate.side,
+    reverseScoreMove: reverseCandidate.scoreMove,
+    reverseScoreRange: reverseCandidate.scoreRange,
+    samePairReverseValid: true,
+    majorityConfirmationText: `At least ${REVERSE_MAJORITY_MIN}/${REVERSE_MAJORITY_WINDOW} internal reverse signals`,
+  };
 }
 
 function evaluateInternalMarketClosures(priceByPair, candidates) {
@@ -328,9 +588,13 @@ function evaluateInternalMarketClosures(priceByPair, candidates) {
       .filter(
         (candidate) =>
           String(candidate.pair || "").toUpperCase() === position.pair &&
-          String(candidate.side || "").toUpperCase() === reverseSide
+          String(candidate.side || "").toUpperCase() === reverseSide &&
+          candidate.validSignalEvent
       )
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))[0];
+
+    if (!reverseCandidate) continue;
+
     const lastThreeOther = recentOtherSignalEvents(history.events, position.pair, REVERSE_MAJORITY_WINDOW);
     const reverseVotes = lastThreeOther.filter((event) => event.side === reverseSide).length;
     const forceClosePrice =
@@ -339,32 +603,20 @@ function evaluateInternalMarketClosures(priceByPair, candidates) {
       Number(position.currentMark) ||
       Number(position.entryPrice);
 
-    if (reverseCandidate && lastThreeOther.length >= REVERSE_MAJORITY_MIN && reverseVotes >= REVERSE_MAJORITY_MIN) {
-      const forced = dryrun.forceCloseTrade(position.signalId || position.id || position.signalKey, forceClosePrice, {
-        reasonCode: "MARKET_REVERSED",
-        reasonText: buildForcedCloseReasonForCondition1(position, reverseSide, reverseVotes, lastThreeOther),
-        forceDirection: reverseSide,
-      });
+    if (
+      lastThreeOther.length === REVERSE_MAJORITY_WINDOW &&
+      reverseVotes >= REVERSE_MAJORITY_MIN
+    ) {
+      const forced = dryrun.forceCloseTrade(
+        position.signalId || position.id || position.signalKey,
+        forceClosePrice,
+        buildForcedCloseDetails(position, reverseCandidate, reverseVotes)
+      );
 
       if (forced) {
         updates.push(forced);
-        priorityCandidates.push(reverseCandidate);
+        if (reverseCandidate.entryEligible) priorityCandidates.push(reverseCandidate);
       }
-      continue;
-    }
-
-    const lastFiveOther = recentOtherSignalEvents(history.events, position.pair, BREADTH_REVERSAL_WINDOW);
-    if (
-      lastFiveOther.length === BREADTH_REVERSAL_WINDOW &&
-      lastFiveOther.every((event) => event.side === reverseSide)
-    ) {
-      const forced = dryrun.forceCloseTrade(position.signalId || position.id || position.signalKey, forceClosePrice, {
-        reasonCode: "BREADTH_REVERSED",
-        reasonText: buildForcedCloseReasonForCondition2(position, reverseSide),
-        forceDirection: reverseSide,
-      });
-
-      if (forced) updates.push(forced);
     }
   }
 
@@ -384,14 +636,14 @@ async function dispatchSignals(bot, chatId, candidates, options = {}) {
   const results = [];
 
   for (const candidate of prioritized) {
+    if (!candidate.validSignalEvent) continue;
+
     const signalKey = buildSignalKey(candidate);
-    const band = getBand(candidate.score);
     const previous = activeSignals[signalKey];
 
     if (!previous) {
-      if (!dryrun.canOpenNewSignal()) {
-        continue;
-      }
+      if (!candidate.entryEligible) continue;
+      if (!dryrun.canOpenNewSignal()) continue;
 
       const tracked = dryrun.registerSignal({
         ...candidate,
@@ -404,7 +656,6 @@ async function dispatchSignals(bot, chatId, candidates, options = {}) {
 
       activeSignals[signalKey] = {
         ...candidate,
-        band,
         messageId: sent?.message_id || null,
         createdAt: new Date().toISOString(),
         updatedAt: new Date().toISOString(),
@@ -414,15 +665,17 @@ async function dispatchSignals(bot, chatId, candidates, options = {}) {
       continue;
     }
 
-    const scoreRise = Number(candidate.score || 0) - Number(previous.score || 0);
-    const raisedBand = bandRank(band) > bandRank(previous.band);
+    const previousRangeIndex = Number(previous.scoreRangeIndex);
+    const currentRangeIndex = Number(candidate.scoreRangeIndex);
+    const isHigherRange =
+      Number.isFinite(currentRangeIndex) &&
+      (!Number.isFinite(previousRangeIndex) || currentRangeIndex > previousRangeIndex);
 
-    if (scoreRise > 0 && (raisedBand || scoreRise >= config.scoreRiseThreshold)) {
+    if (candidate.momentumStatus === "continuation" && isHigherRange) {
       await sendScoreRise(bot, chatId, previous, candidate);
       activeSignals[signalKey] = {
         ...previous,
         ...candidate,
-        band,
         updatedAt: new Date().toISOString(),
       };
       results.push({ type: "rise", key: signalKey, candidate });
@@ -432,8 +685,7 @@ async function dispatchSignals(bot, chatId, candidates, options = {}) {
     activeSignals[signalKey] = {
       ...previous,
       ...candidate,
-      band: previous.band || band,
-      updatedAt: previous.updatedAt || new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
     };
   }
 
@@ -446,7 +698,7 @@ async function dispatchTradeUpdates(bot, chatId, updates) {
 
   const activeSignals = state.readJson(config.activeSignalsPath, {});
   const sent = [];
-  let dirty = false
+  let dirty = false;
 
   for (const update of updates) {
     const position = update.position || update;
@@ -489,9 +741,12 @@ async function dispatchTradeUpdates(bot, chatId, updates) {
 
 module.exports = {
   buildSignalCandidate,
-  dispatchSignals,
-  dispatchTradeUpdates,
   buildSignalKey,
   dedupeCandidates,
+  dispatchSignals,
+  dispatchTradeUpdates,
   evaluateInternalMarketClosures,
+  getScoreRangeIndex,
+  getScoreRangeLabel,
+  prepareSignalCandidates,
 };

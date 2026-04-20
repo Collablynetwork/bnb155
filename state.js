@@ -74,6 +74,8 @@ function getStoragePaths() {
     strategiesDir,
     pairsPath: config.pairsPath || path.join(storageDir, "pairs.json"),
     scoreStatePath: config.scoreStatePath || path.join(storageDir, "score-state.json"),
+    scoreMomentumStatePath:
+      config.scoreMomentumStatePath || path.join(storageDir, "score-momentum-state.json"),
     activeSignalsPath: config.activeSignalsPath || path.join(storageDir, "active-signals.json"),
     dryRunPositionsPath: config.dryRunPositionsPath || path.join(storageDir, "dryrun-positions.json"),
     closedTradesPath: config.closedTradesPath || path.join(storageDir, "closed-trades.json"),
@@ -93,6 +95,7 @@ function ensureStorage() {
   ensureDir(paths.strategiesDir);
   ensureJsonFile(paths.pairsPath, getAllowedPairs());
   ensureJsonFile(paths.scoreStatePath, {});
+  ensureJsonFile(paths.scoreMomentumStatePath, {});
   ensureJsonFile(paths.activeSignalsPath, {});
   ensureJsonFile(paths.dryRunPositionsPath, []);
   ensureJsonFile(paths.closedTradesPath, []);

@@ -47,7 +47,10 @@ function buildSignalMessage(candidate) {
     `🌐 Binance: ${buildBinancePairLink(candidate.pair)}`,
     `⏱ Base TF: ${candidate.baseTimeframe || candidate.baseTf || "N/A"}`,
     `📚 Support TFs (${supportTfs.length}): ${supportTfs.join(", ") || "N/A"}`,
-    `🎯 Score: ${formatScore(candidate.score)}`,
+    `📊 Score: ${formatScore(candidate.score)}`,
+    `🧭 Score Range: ${candidate.scoreRange || "N/A"}`,
+    `📈 Score Move: ${candidate.scoreMove || "N/A"}`,
+    `✅ Momentum: ${candidate.momentum || "N/A"}`,
     `💵 Entry Price: ${formatPrice(candidate.entry)}`,
     `✅ Target Price: ${formatPrice(candidate.targetPrice)}`,
     `❌ Stop Price: ${formatPrice(candidate.stopPrice)}`,
@@ -69,11 +72,23 @@ function buildSignalReplyMarkup(candidate) {
   };
 }
 
-function buildScoreRisingMessage({ pair, baseTf, oldScore, newScore, updates = [] }) {
+function buildScoreRisingMessage({
+  pair,
+  baseTf,
+  oldScore,
+  newScore,
+  scoreRange,
+  scoreMove,
+  momentum,
+  updates = [],
+}) {
   return [
     `🚀 Score Increased for ${pair}`,
     `⏱ TF: ${baseTf || "N/A"}`,
-    `📈 Score: ${formatScore(oldScore)} → ${formatScore(newScore)}`,
+    `📊 Score: ${formatScore(oldScore)} → ${formatScore(newScore)}`,
+    `🧭 Score Range: ${scoreRange || "N/A"}`,
+    `📈 Score Move: ${scoreMove || "N/A"}`,
+    `✅ Momentum: ${momentum || "N/A"}`,
     updates.length ? `✅ Updates: ${updates.join(" | ")}` : null,
   ].filter(Boolean).join("\n");
 }
@@ -116,14 +131,14 @@ function buildStopHitMessage(position) {
 
 function buildForceClosedMessage(position) {
   return [
-    "⚠️ SIGNAL CLOSED FORCEFULLY",
+    "🔁 FORCE CLOSE: MARKET REVERSAL",
     `🪙 Pair: ${position.pair}`,
-    `📍 Side: ${position.side}`,
-    `⏱ Base TF: ${position.baseTimeframe}`,
-    `💵 Entry: ${formatPrice(position.entryPrice || position.entry)}`,
-    `📌 Exit Mark: ${formatPrice(position.currentMark)}`,
-    `💹 PNL: ${formatPrice(position.pnlAmount)} (${formatPct(position.pnlPct)})`,
-    `📝 Reason: ${position.forceCloseReason || "Internal market breadth reversed."}`,
+    `📉 Closed Signal: ${position.side}`,
+    `📈 Reverse Pressure: ${position.reverseSignalSide || position.forceClosedDirection || "N/A"}`,
+    `📊 Reverse Score Move: ${position.reverseScoreMove || "N/A"}`,
+    `✅ Same-Pair Reverse: ${position.samePairReverseValid ? "Valid" : "Blocked"}`,
+    `✅ Majority Confirmation: ${position.majorityConfirmationText || "At least 2/3 internal reverse signals"}`,
+    `🧠 Reason: ${position.forceCloseReason || "Same-pair reverse signal plus market-wide reverse confirmation."}`,
   ].join("\n");
 }
 

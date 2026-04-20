@@ -73,6 +73,12 @@ function normalizePosition(position, options = {}) {
   normalized.forceCloseReason = normalized.forceCloseReason ?? null;
   normalized.forceCloseCode = normalized.forceCloseCode ?? null;
   normalized.forceClosedDirection = normalized.forceClosedDirection ?? null;
+  normalized.reverseSignalSide = normalized.reverseSignalSide ?? null;
+  normalized.reverseScoreMove = normalized.reverseScoreMove ?? null;
+  normalized.reverseScoreRange = normalized.reverseScoreRange ?? null;
+  normalized.samePairReverseValid =
+    typeof normalized.samePairReverseValid === "boolean" ? normalized.samePairReverseValid : null;
+  normalized.majorityConfirmationText = normalized.majorityConfirmationText ?? null;
 
   for (const key of Object.keys(normalized)) {
     if (
@@ -374,6 +380,12 @@ function forceCloseTrade(identifier, exitPrice, details = {}) {
   position.forceCloseReason = details.reasonText || details.reason || null;
   position.forceCloseCode = details.reasonCode || null;
   position.forceClosedDirection = details.forceDirection || null;
+  position.reverseSignalSide = details.reverseSignalSide || null;
+  position.reverseScoreMove = details.reverseScoreMove || null;
+  position.reverseScoreRange = details.reverseScoreRange || null;
+  position.samePairReverseValid =
+    typeof details.samePairReverseValid === "boolean" ? details.samePairReverseValid : null;
+  position.majorityConfirmationText = details.majorityConfirmationText || null;
 
   const event = markTradeClosed(position, "FORCE CLOSED", mark);
   if (!event) return null;
