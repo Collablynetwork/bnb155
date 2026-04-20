@@ -2,6 +2,7 @@ const config = require("./config");
 const state = require("./state");
 const dryrun = require("./dryrun");
 const { deleteTelegramMessageLater } = require("./telegramCleanup");
+const { sendSignalWebhook, sendTradeUpdateWebhook } = require("./webhookClient");
 const {
   buildSignalMessage,
   buildSignalReplyMarkup,
@@ -127,6 +128,194 @@ function chooseStopAndTargets(side, entry, currentFeatures = {}) {
   };
 }
 
+function finiteFeature(value) {
+  const num = Number(value);
+  return Number.isFinite(num) ? num : null;
+}
+
+function pctNear(price, level, tolerancePct) {
+  const p = finiteFeature(price);
+  const l = finiteFeature(level);
+  if (!p || !l || p <= 0 || l <= 0) return false;
+  return Math.abs((p - l) / l) * 100 <= Number(tolerancePct || 0);
+}
+
+function valueAtOrNearUpper(price, level, tolerancePct) {
+  const p = finiteFeature(price);
+  const l = finiteFeature(level);
+  if (!p || !l || p <= 0 || l <= 0) return false;
+  return p >= l * (1 - (Number(tolerancePct || 0) / 100));
+}
+
+function valueAtOrNearLower(price, level, tolerancePct) {
+  const p = finiteFeature(price);
+  const l = finiteFeature(level);
+  if (!p || !l || p <= 0 || l <= 0) return false;
+  return p <= l * (1 + (Number(tolerancePct || 0) / 100));
+}
+
+function isVolumeSpike(features) {
+  const min = Number(config.volumeSpikeMinRatio || 1.2);
+  const vol = finiteFeature(features.volumeVsAvg20);
+  const qVol = finiteFeature(features.quoteVolumeVsAvg20);
+  return (vol !== null && vol >= min) || (qVol !== null && qVol >= min);
+}
+
+function isShortChaseAfterDump(score, features) {
+  const bigMove = Number(config.bigCandleReturnPct || 0.45);
+  const ret1 = finiteFeature(features.return1);
+  const bodyPct = finiteFeature(features.bodyPctOfRange);
+  const candleDirection = String(features.candleDirection || "").toLowerCase();
+  return (
+    Number(score || 0) >= 90 &&
+    ((ret1 !== null && ret1 <= -bigMove) ||
+      (candleDirection === "bearish" && bodyPct !== null && bodyPct >= 60))
+  );
+}
+
+function isLongChaseAfterPump(score, features) {
+  const bigMove = Number(config.bigCandleReturnPct || 0.45);
+  const ret1 = finiteFeature(features.return1);
+  const bodyPct = finiteFeature(features.bodyPctOfRange);
+  const candleDirection = String(features.candleDirection || "").toLowerCase();
+  return (
+    Number(score || 0) >= 90 &&
+    ((ret1 !== null && ret1 >= bigMove) ||
+      (candleDirection === "bullish" && bodyPct !== null && bodyPct >= 60))
+  );
+}
+
+function evaluateTopBottomEntrySetup(side, score, features = {}) {
+  const normalizedSide = String(side || "LONG").toUpperCase() === "SHORT" ? "SHORT" : "LONG";
+  const bandPct = Number(config.entryNearBandPct || 0.35);
+  const levelPct = Number(config.entryNearLevelPct || 0.45);
+  const wickMin = Number(config.rejectionWickMinPct || 28);
+
+  const close = finiteFeature(features.currentClose);
+  const high = finiteFeature(features.currentHigh);
+  const low = finiteFeature(features.currentLow);
+  const support = finiteFeature(features.support ?? features.recentLow20);
+  const resistance = finiteFeature(features.resistance ?? features.recentHigh20);
+  const bbUpper = finiteFeature(features.bbUpper);
+  const bbLower = finiteFeature(features.bbLower);
+  const rangePosition = finiteFeature(features.rangePositionPct);
+  const rsi14 = finiteFeature(features.rsi14);
+  const rsiSlope = finiteFeature(features.rsiSlope);
+  const macdLine = finiteFeature(features.macdLine);
+  const macdSignal = finiteFeature(features.macdSignal);
+  const macdHistogramSlope = finiteFeature(features.macdHistogramSlope);
+  const upperWick = finiteFeature(features.upperWickPctOfRange) ?? 0;
+  const lowerWick = finiteFeature(features.lowerWickPctOfRange) ?? 0;
+
+  const reasons = [];
+  const failures = [];
+  const volumeSpike = isVolumeSpike(features);
+
+  if (normalizedSide === "SHORT") {
+    const nearUpperBb =
+      valueAtOrNearUpper(high ?? close, bbUpper, bandPct) ||
+      pctNear(close, bbUpper, bandPct) ||
+      (rangePosition !== null && rangePosition >= 70);
+    const nearResistance =
+      valueAtOrNearUpper(high ?? close, resistance, levelPct) ||
+      pctNear(close, resistance, levelPct);
+    const priceNearTop = nearUpperBb || nearResistance;
+    const failedBreakout = Boolean(
+      (resistance && high && close && high > resistance && close < resistance) ||
+        (bbUpper && high && close && high > bbUpper && close < bbUpper)
+    );
+    const wickReject = upperWick >= wickMin;
+    const bearishTurn = Boolean(
+      features.macdBearCross === true ||
+        (macdLine !== null && macdSignal !== null && macdLine <= macdSignal) ||
+        (macdHistogramSlope !== null && macdHistogramSlope < 0)
+    );
+    const rsiCooling = Boolean(
+      (rsi14 !== null && rsi14 >= 70) ||
+        (rsi14 !== null && rsi14 >= 55 && rsiSlope !== null && rsiSlope < 0)
+    );
+    const volumeOrFailedBreakout = volumeSpike || failedBreakout;
+
+    if (priceNearTop) reasons.push("price near resistance / upper BB");
+    else failures.push("price is not near resistance / upper BB");
+
+    if (wickReject) reasons.push("upper wick rejection");
+    if (failedBreakout) reasons.push("failed breakout");
+    if (!wickReject && !failedBreakout) failures.push("no upper-wick rejection or failed breakout");
+
+    if (bearishTurn) reasons.push("MACD bearish turn / slowdown");
+    else failures.push("MACD bearish turn not confirmed");
+
+    if (rsiCooling) reasons.push("RSI overbought or cooling down");
+    else failures.push("RSI is not overbought/cooling");
+
+    if (volumeSpike) reasons.push("volume spike");
+    if (!volumeOrFailedBreakout) failures.push("no volume spike or failed breakout");
+
+    if (isShortChaseAfterDump(score, features)) {
+      failures.push("short score is 90+ after a big red candle; avoid chasing dump");
+    }
+
+    return {
+      isValid: failures.length === 0,
+      label: failures.length === 0 ? "SHORT Top Rejection" : "Invalid SHORT Top",
+      reasons,
+      failures,
+    };
+  }
+
+  const nearLowerBb =
+    valueAtOrNearLower(low ?? close, bbLower, bandPct) ||
+    pctNear(close, bbLower, bandPct) ||
+    (rangePosition !== null && rangePosition <= 30);
+  const nearSupport =
+    valueAtOrNearLower(low ?? close, support, levelPct) ||
+    pctNear(close, support, levelPct);
+  const priceNearBottom = nearLowerBb || nearSupport;
+  const failedBreakdown = Boolean(
+    (support && low && close && low < support && close > support) ||
+      (bbLower && low && close && low < bbLower && close > bbLower)
+  );
+  const wickReject = lowerWick >= wickMin;
+  const bullishTurn = Boolean(
+    features.macdBullCross === true ||
+      (macdLine !== null && macdSignal !== null && macdLine >= macdSignal) ||
+      (macdHistogramSlope !== null && macdHistogramSlope > 0)
+  );
+  const rsiRecovering = Boolean(
+    (rsi14 !== null && rsi14 <= 30) ||
+      (rsi14 !== null && rsi14 <= 45 && rsiSlope !== null && rsiSlope > 0)
+  );
+  const volumeOrFailedBreakdown = volumeSpike || failedBreakdown;
+
+  if (priceNearBottom) reasons.push("price near support / lower BB");
+  else failures.push("price is not near support / lower BB");
+
+  if (wickReject) reasons.push("lower wick rejection");
+  if (failedBreakdown) reasons.push("failed breakdown");
+  if (!wickReject && !failedBreakdown) failures.push("no lower-wick rejection or failed breakdown");
+
+  if (bullishTurn) reasons.push("MACD bullish turn / selling slowdown");
+  else failures.push("MACD bullish turn not confirmed");
+
+  if (rsiRecovering) reasons.push("RSI oversold or recovering");
+  else failures.push("RSI is not oversold/recovering");
+
+  if (volumeSpike) reasons.push("volume spike");
+  if (!volumeOrFailedBreakdown) failures.push("no volume spike or failed breakdown");
+
+  if (isLongChaseAfterPump(score, features)) {
+    failures.push("long score is 90+ after a big green candle; avoid chasing pump");
+  }
+
+  return {
+    isValid: failures.length === 0,
+    label: failures.length === 0 ? "LONG Bottom Rejection" : "Invalid LONG Bottom",
+    reasons,
+    failures,
+  };
+}
+
 function buildSignalCandidate(matchResult) {
   if (!matchResult) return null;
   const score = Number(matchResult.score);
@@ -170,6 +359,7 @@ function buildSignalCandidate(matchResult) {
     matchResult.strategy?.mainSourceTimeframe ||
     "N/A";
   const strategyUsed = `${strategySourcePair} ${strategySourceTimeframe}`.trim();
+  const entrySetup = evaluateTopBottomEntrySetup(side, score, currentFeatures);
 
   return {
     pair,
@@ -200,6 +390,11 @@ function buildSignalCandidate(matchResult) {
       Number(matchResult.riskReward) ||
       (riskDistance > 0 ? Number((rewardDistance / riskDistance).toFixed(4)) : null),
     regimeSupportScore: matchResult.regimeSupportScore ?? null,
+    entrySetupValid: entrySetup.isValid,
+    entrySetupLabel: entrySetup.label,
+    entrySetupReasons: entrySetup.reasons,
+    entrySetupFailures: entrySetup.failures,
+    entrySetupBlockReason: entrySetup.failures.join("; "),
   };
 }
 
@@ -458,6 +653,25 @@ function prepareSignalCandidates(candidates, options = {}) {
     evaluatedCandidates.push(enriched);
 
     if (evaluation.validSignalEvent) {
+      if (evaluation.entryEligible && enriched.entrySetupValid !== true) {
+        const blocked = {
+          ...enriched,
+          validSignalEvent: false,
+          entryEligible: false,
+          momentumStatus: "entry_setup_blocked",
+          momentum: "Entry Setup Blocked",
+          blockedReason:
+            enriched.entrySetupBlockReason ||
+            `${enriched.side} entry requires fresh T1 → T2 plus top/bottom rejection`,
+        };
+        blockedCandidates.push(blocked);
+        logBlockedCandidate(blocked, {
+          blockedReason: blocked.blockedReason,
+          shouldLogBlocked: true,
+        });
+        continue;
+      }
+
       validCandidates.push(enriched);
       continue;
     }
@@ -528,7 +742,7 @@ function saveInternalSignalHistory(snapshot) {
 function recordInternalSignalEvents(candidates, recordedAt = new Date().toISOString()) {
   const history = loadInternalSignalHistory();
   const strongest = strongestCandidatePerPair(candidates)
-    .filter((candidate) => candidate.validSignalEvent)
+    .filter((candidate) => candidate.validSignalEvent && (candidate.entryEligible !== true || candidate.entrySetupValid === true))
     .sort((a, b) => Number(a.score || 0) - Number(b.score || 0));
 
   for (const candidate of strongest) {
@@ -543,6 +757,8 @@ function recordInternalSignalEvents(candidates, recordedAt = new Date().toISOStr
       momentum: candidate.momentum || null,
       transitionType: candidate.momentumStatus || null,
       entryEligible: candidate.entryEligible === true,
+      entrySetupValid: candidate.entrySetupValid === true,
+      reversalEligible: candidate.entryEligible === true && candidate.entrySetupValid === true,
       baseTimeframe: candidate.baseTimeframe || null,
       signalKey: candidate.signalKey || buildSignalKey(candidate),
       recordedAt,
@@ -589,14 +805,18 @@ function evaluateInternalMarketClosures(priceByPair, candidates) {
         (candidate) =>
           String(candidate.pair || "").toUpperCase() === position.pair &&
           String(candidate.side || "").toUpperCase() === reverseSide &&
-          candidate.validSignalEvent
+          candidate.validSignalEvent &&
+          candidate.entryEligible === true &&
+          candidate.entrySetupValid === true
       )
       .sort((a, b) => Number(b.score || 0) - Number(a.score || 0))[0];
 
     if (!reverseCandidate) continue;
 
     const lastThreeOther = recentOtherSignalEvents(history.events, position.pair, REVERSE_MAJORITY_WINDOW);
-    const reverseVotes = lastThreeOther.filter((event) => event.side === reverseSide).length;
+    const reverseVotes = lastThreeOther.filter(
+      (event) => event.side === reverseSide && event.reversalEligible === true
+    ).length;
     const forceClosePrice =
       Number(priceByPair?.[position.pair]) ||
       Number(reverseCandidate?.currentPrice) ||
@@ -653,6 +873,15 @@ async function dispatchSignals(bot, chatId, candidates, options = {}) {
 
       const sent = await sendNewSignal(bot, chatId, candidate);
       dryrun.attachSignalMessage(tracked.signalId || tracked.id, sent?.message_id || null, signalKey);
+
+      const webhookResult = await sendSignalWebhook({
+        ...candidate,
+        signalId: tracked.signalId || tracked.id || null,
+        telegramMessageId: sent?.message_id || null,
+      });
+      if (webhookResult?.ok === false && !webhookResult?.skipped) {
+        console.error(`Webhook signal delivery failed for ${signalKey}:`, webhookResult.error || webhookResult.status || webhookResult.reason);
+      }
 
       activeSignals[signalKey] = {
         ...candidate,
@@ -720,6 +949,12 @@ async function dispatchTradeUpdates(bot, chatId, updates) {
       text,
       replyTo ? { reply_to_message_id: replyTo } : {}
     );
+
+    const webhookResult = await sendTradeUpdateWebhook(position, update.type);
+    if (webhookResult?.ok === false && !webhookResult?.skipped) {
+      console.error(`Webhook trade-update delivery failed for ${position.pair || "UNKNOWN"}:`, webhookResult.error || webhookResult.status || webhookResult.reason);
+    }
+
     sent.push(message);
 
     const signalKey = position.signalKey || buildSignalKey(position);
@@ -748,5 +983,6 @@ module.exports = {
   evaluateInternalMarketClosures,
   getScoreRangeIndex,
   getScoreRangeLabel,
+  evaluateTopBottomEntrySetup,
   prepareSignalCandidates,
 };

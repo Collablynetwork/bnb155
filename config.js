@@ -66,6 +66,15 @@ module.exports = {
 
   allowedBaseTimeframes: ["1m", "5m"],
   minSupportCount: finiteNumber(process.env.MIN_SUPPORT_COUNT, 3),
+
+  // Top / bottom entry filter. These values keep entries close to support/resistance
+  // and block late chase signals after extended candles.
+  entryNearBandPct: finiteNumber(process.env.ENTRY_NEAR_BAND_PCT, 0.35),
+  entryNearLevelPct: finiteNumber(process.env.ENTRY_NEAR_LEVEL_PCT, 0.45),
+  rejectionWickMinPct: finiteNumber(process.env.REJECTION_WICK_MIN_PCT, 28),
+  volumeSpikeMinRatio: finiteNumber(process.env.VOLUME_SPIKE_MIN_RATIO, 1.2),
+  bigCandleReturnPct: finiteNumber(process.env.BIG_CANDLE_RETURN_PCT, 0.45),
+
   systemTargetAdjustPct: finiteNumber(process.env.SYSTEM_TARGET_ADJUST_PCT, 0.1),
   systemStopAdjustPct: finiteNumber(process.env.SYSTEM_STOP_ADJUST_PCT, 0.1),
 
@@ -84,6 +93,8 @@ module.exports = {
   closedTradesPath: path.join(storageDir, "closed-trades.json"),
   learnedPumpsPath: path.join(storageDir, "learned-pumps.json"),
   internalSignalHistoryPath: path.join(storageDir, "internal-signal-history.json"),
+  webhookSettingsPath: path.join(storageDir, "webhook-settings.json"),
+  webhookTimeoutMs: finiteNumber(process.env.WEBHOOK_TIMEOUT_MS, 12_000),
   strategySettingsPath: path.join(storageDir, "strategy-settings.json"),
 
   strategiesDir,

@@ -82,6 +82,8 @@ function getStoragePaths() {
     learnedPumpsPath: config.learnedPumpsPath || path.join(storageDir, "learned-pumps.json"),
     internalSignalHistoryPath:
       config.internalSignalHistoryPath || path.join(storageDir, "internal-signal-history.json"),
+    webhookSettingsPath:
+      config.webhookSettingsPath || path.join(storageDir, "webhook-settings.json"),
     strategySettingsPath:
       config.strategySettingsPath || path.join(storageDir, "strategy-settings.json"),
     strategiesIndexPath: config.strategiesIndexPath || path.join(strategiesDir, "index.json"),
@@ -103,6 +105,16 @@ function ensureStorage() {
   ensureJsonFile(paths.internalSignalHistoryPath, {
     events: [],
     lastByPair: {},
+  });
+  ensureJsonFile(paths.webhookSettingsPath, {
+    enabled: false,
+    url: "",
+    privateKey: "",
+    createdAt: null,
+    updatedAt: null,
+    lastDeliveryAt: null,
+    lastDeliveryStatus: null,
+    lastError: null,
   });
   ensureJsonFile(paths.strategySettingsPath, {
     keepRecentDays: Number(config.defaultStrategyRetentionDays || 3),

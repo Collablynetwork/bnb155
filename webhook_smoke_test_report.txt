@@ -1,0 +1,31 @@
+Webhook Integration Update - Smoke Test Report
+Date: 2026-04-20
+
+Checks performed:
+1. Syntax validation passed for:
+   - config.js
+   - state.js
+   - webhookClient.js
+   - signals.js
+   - telegram.js
+   - index.js
+
+2. Runtime smoke test passed for existing trading logic with webhook module loaded:
+   - strict base timeframe filter
+   - minimum support confirmations
+   - score momentum filter
+   - top/bottom rejection filter
+   - dry-run trade tracking
+   - strategy retention logic
+
+3. Webhook integration points verified by code path:
+   - /setwebhook command stores URL/private key in storage/webhook-settings.json
+   - /webhookstatus displays masked key and latest delivery status
+   - /testwebhook sends WEBHOOK_TEST event
+   - /removewebhook disables and clears stored webhook settings
+   - SIGNAL_CREATED webhook is sent after a new Telegram signal is created
+   - TRADE_UPDATE webhook is sent after target/SL/force-close updates
+
+Note:
+- Test used local stubs for network packages inside the container.
+- Live webhook URL delivery was not executed because no real webhook URL/private key was provided.

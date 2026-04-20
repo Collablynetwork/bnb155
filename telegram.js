@@ -12,6 +12,12 @@ const {
 } = require("./strategyLearner");
 const dryrun = require("./dryrun");
 const { sendTemporaryMessage, cleanupIncomingMessage } = require("./telegramCleanup");
+const {
+  setWebhook,
+  removeWebhook,
+  buildWebhookStatusText,
+  sendTestWebhook,
+} = require("./webhookClient");
 
 const MENU_ACTIONS = {
   pairs: "Watched Pairs",
@@ -24,6 +30,7 @@ const MENU_ACTIONS = {
   dryrunshort: "Short Dry Run",
   strategies: "Strategy Dashboard",
   strategylist: "Strategy List",
+  webhookstatus: "Webhook Status",
   help: "Help Center",
 };
 
@@ -33,6 +40,10 @@ const COMMANDS = [
   { command: "pairs", description: "Show watched pairs" },
   { command: "addpair", description: "Add pair. Example: /addpair BTCUSDT" },
   { command: "removepair", description: "Remove pair. Example: /removepair BTCUSDT" },
+  { command: "setwebhook", description: "Set webhook URL and private key" },
+  { command: "removewebhook", description: "Remove webhook integration" },
+  { command: "webhookstatus", description: "Show webhook status" },
+  { command: "testwebhook", description: "Send webhook test event" },
   { command: "scan", description: "Run scan now" },
   { command: "dryrun", description: "Show dry-run summary" },
   { command: "pnl", description: "Show PNL summary" },
@@ -178,6 +189,10 @@ function buildHelpText() {
     "/pairs - show watched pairs",
     "/addpair BTCUSDT - add pair if it exists in pair.js",
     "/removepair BTCUSDT - remove pair from active scan list",
+    "/setwebhook https://your-webhook-url PRIVATE_KEY - connect webhook receiver",
+    "/webhookstatus - show webhook status",
+    "/testwebhook - send test webhook event",
+    "/removewebhook - remove webhook receiver",
     "/scan - run scan now",
     "/dryrun - dry-run overview",
     "/pnl - PNL dashboard",
@@ -205,7 +220,7 @@ function buildMainMenu() {
         buildActionRow("closed", "pairs"),
         buildActionRow("dryrunlong", "dryrunshort"),
         buildActionRow("strategies", "strategylist"),
-        buildActionRow("help"),
+        buildActionRow("webhookstatus", "help"),
       ],
       resize_keyboard: true,
       one_time_keyboard: false,
@@ -397,6 +412,74 @@ function registerHandlers(bot, callbacks) {
     const next = getWatchedPairs().filter((item) => item !== pair);
     saveWatchedPairs(next);
     await sendTemporaryMessage(bot, msg.chat.id, `🗑 Removed ${pair}`, buildMainMenu());
+  });
+
+  bot.onText(commandRegex("setwebhook"), async (msg) => {
+    cleanupIncomingMessage(bot, msg);
+    await sendTemporaryMessage(
+      bot,
+      msg.chat.id,
+      [
+        "🔗 Send webhook like this:",
+        "/setwebhook https://your-webhook-url your_private_key",
+        "",
+        "This webhook will receive valid signal and trade-update events.",
+      ].join("\n"),
+      buildMainMenu()
+    );
+  });
+
+  bot.onText(commandRegex("setwebhook", true), async (msg, match) => {
+    cleanupIncomingMessage(bot, msg);
+    const raw = String(match[1] || "").trim();
+    const [url, ...keyParts] = raw.split(/\s+/);
+    const privateKey = keyParts.join(" ").trim();
+
+    try {
+      const settings = setWebhook(url, privateKey);
+      await sendTemporaryMessage(
+        bot,
+        msg.chat.id,
+        [
+          "✅ Webhook connected",
+          `URL: ${settings.url}`,
+          "Private key: saved securely in storage/webhook-settings.json",
+          "",
+          "Use /testwebhook to verify delivery.",
+        ].join("\n"),
+        buildMainMenu()
+      );
+    } catch (error) {
+      await sendTemporaryMessage(
+        bot,
+        msg.chat.id,
+        `❌ ${error.message}
+
+Use: /setwebhook https://your-webhook-url your_private_key`,
+        buildMainMenu()
+      );
+    }
+  });
+
+  bot.onText(menuCommandRegex("webhookstatus"), async (msg) => {
+    cleanupIncomingMessage(bot, msg);
+    await sendTemporaryMessage(bot, msg.chat.id, buildWebhookStatusText(), buildMainMenu());
+  });
+
+  bot.onText(commandRegex("testwebhook"), async (msg) => {
+    cleanupIncomingMessage(bot, msg);
+    await sendTemporaryMessage(bot, msg.chat.id, "🔗 Sending test webhook...");
+    const result = await sendTestWebhook();
+    const text = result.ok
+      ? `✅ Test webhook delivered. Status: ${result.status}`
+      : `❌ Test webhook failed: ${result.reason || result.error || result.status || "unknown error"}`;
+    await sendTemporaryMessage(bot, msg.chat.id, text, buildMainMenu());
+  });
+
+  bot.onText(commandRegex("removewebhook"), async (msg) => {
+    cleanupIncomingMessage(bot, msg);
+    removeWebhook();
+    await sendTemporaryMessage(bot, msg.chat.id, "🗑 Webhook integration removed.", buildMainMenu());
   });
 
   bot.onText(menuCommandRegex("scan"), async (msg) => {
